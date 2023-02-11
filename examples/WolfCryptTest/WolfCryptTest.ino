@@ -1,11 +1,11 @@
 /***************************************************************************//**
  * @file    WolfCryptTest.ino
- * @brief   Arduino wolfSSL library crypto test
+ * @brief   Arduino wolfSSL library cryptographic algorithm testing
  * @author  onelife <onelife.real[at]gmail.com>
  ******************************************************************************/
 #include <rtt.h>
-#include <wolfssl.h>
 #include <RttCrypto.h>
+#include <wolfssl.h>
 
 #define LOG_TAG "Test"
 #include <log.h>

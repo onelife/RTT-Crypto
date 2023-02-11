@@ -6,34 +6,9 @@
  */
 
 /*
- * Copyright (c) 2017 Simon Goldschmidt
- * All rights reserved.
+ * This file is modified form "altcp_tls_mbedtls.c".
  *
- * Redistribution and use in source and binary forms, with or without modification,
- * are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- *    this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the documentation
- *    and/or other materials provided with the distribution.
- * 3. The name of the author may not be used to endorse or promote products
- *    derived from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT
- * SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT
- * OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
- * OF SUCH DAMAGE.
- *
- * This file is part of the lwIP TCP/IP stack.
- *
- * Author: Simon Goldschmidt <goldsimon@gmx.de>, onelife
+ * Author: onelife <onelife.real[at]gmail.com>
  *
  * Watch out:
  * - 'sent' is always called with len==0 to the upper layer. This is because keeping
@@ -45,7 +20,7 @@
  * - if having hardware TRNG then define CUSTOM_RAND_GENERATE_BLOCK
  *
  * Missing things / @todo:
- * - some unhandled/untested things migh be caught by LWIP_ASSERTs...
+ * - some unhandled/untested things might be caught by LWIP_ASSERTs...
  */
 
 #include "lwip/opt.h"
@@ -74,16 +49,11 @@
    since it contains pointers to static functions declared here */
 extern const struct altcp_functions altcp_wolfssl_functions;
 
-static err_t altcp_wolfssl_setup(
-  void *conf, struct altcp_pcb *conn, struct altcp_pcb *inner_conn);
-static err_t altcp_wolfssl_lower_recv(
-  void *arg, struct altcp_pcb *inner_conn, struct pbuf *p, err_t err);
-static err_t altcp_wolfssl_handle_rx_appldata(
-  struct altcp_pcb *conn, altcp_wolfssl_state_t *state);
-static err_t altcp_wolfssl_lower_recv_process(
-  struct altcp_pcb *conn, altcp_wolfssl_state_t *state);
-static int altcp_wolfssl_bio_send(
-  WOLFSSL *ssl, char *dataptr, int size, void *ctx);
+static err_t altcp_wolfssl_setup(void *conf, struct altcp_pcb *conn, struct altcp_pcb *inner_conn);
+static err_t altcp_wolfssl_lower_recv(void *arg, struct altcp_pcb *inner_conn, struct pbuf *p, err_t err);
+static err_t altcp_wolfssl_handle_rx_appldata(struct altcp_pcb *conn, altcp_wolfssl_state_t *state);
+static err_t altcp_wolfssl_lower_recv_process(struct altcp_pcb *conn, altcp_wolfssl_state_t *state);
+static int altcp_wolfssl_bio_send(WOLFSSL *ssl, char *dataptr, int size, void *ctx);
 static int altcp_wolfssl_bio_recv(WOLFSSL *ssl, char *buf, int len, void *ctx);
 
 /* callback functions from inner/lower connection: */
@@ -93,8 +63,7 @@ static int altcp_wolfssl_bio_recv(WOLFSSL *ssl, char *buf, int len, void *ctx);
  * call the new connection's 'accepted' callback. If that succeeds, we wait
  * to receive connection setup handshake bytes from the client.
  */
-static err_t altcp_wolfssl_lower_accept(
-  void *arg, struct altcp_pcb *accepted_conn, err_t err) {
+static err_t altcp_wolfssl_lower_accept(void *arg, struct altcp_pcb *accepted_conn, err_t err) {
   struct altcp_pcb *listen_conn = (struct altcp_pcb *)arg;
   if (listen_conn && listen_conn->state && listen_conn->accept) {
     err_t setup_err;
@@ -109,6 +78,7 @@ static err_t altcp_wolfssl_lower_accept(
       altcp_free(new_conn);
       return setup_err;
     }
+    rt_kprintf("lower_accept %p %p\n", accepted_conn, new_conn);
     return listen_conn->accept(listen_conn->arg, new_conn, err);
   }
   return ERR_ARG;
@@ -117,8 +87,7 @@ static err_t altcp_wolfssl_lower_accept(
 /** Connected callback from lower connection (i.e. TCP).
  * Not really implemented/tested yet...
  */
-static err_t altcp_wolfssl_lower_connected(
-  void *arg, struct altcp_pcb *inner_conn, err_t err) {
+static err_t altcp_wolfssl_lower_connected(void *arg, struct altcp_pcb *inner_conn, err_t err) {
   struct altcp_pcb *conn = (struct altcp_pcb *)arg;
   LWIP_UNUSED_ARG(inner_conn); /* for LWIP_NOASSERT */
   if (conn && conn->state) {
@@ -126,32 +95,30 @@ static err_t altcp_wolfssl_lower_connected(
     /* upper connected is called when handshake is done */
     if (ERR_OK != err) {
       if (conn->connected) {
+        rt_kprintf("lower_onnected %p\n", inner_conn);
         return conn->connected(conn->arg, conn, err);
       }
     }
-    return altcp_wolfssl_lower_recv_process(
-      conn, (altcp_wolfssl_state_t *)conn->state);
+    return altcp_wolfssl_lower_recv_process(conn, (altcp_wolfssl_state_t *)conn->state);
   }
   return ERR_VAL;
 }
 
 /* Call recved for possibly more than an u16_t */
-static void altcp_wolfssl_lower_recved(
-  struct altcp_pcb *inner_conn, int recvd_cnt) {
+static void altcp_wolfssl_lower_recved(struct altcp_pcb *inner_conn, int recvd_cnt) {
   while (recvd_cnt > 0) {
     u16_t recvd_part = (u16_t)LWIP_MIN(recvd_cnt, 0xFFFF);
+    rt_kprintf("lower_recved %p\n", inner_conn);
     altcp_recved(inner_conn, recvd_part);
     recvd_cnt -= recvd_part;
   }
 }
 
 /** Recv callback from lower connection (i.e. TCP)
- * This one mainly differs between connection setup/handshake (data is fed into
- * wolfSSL only) and application phase (data is decoded by wolfSSL and passed
- * on to the application).
+ * This one mainly differs between connection setup/handshake (data is fed into wolfSSL only)
+ * and application phase (data is decoded by wolfSSL and passed on to the application)
  */
-static err_t altcp_wolfssl_lower_recv(
-  void *arg, struct altcp_pcb *inner_conn, struct pbuf *p, err_t err) {
+static err_t altcp_wolfssl_lower_recv(void *arg, struct altcp_pcb *inner_conn, struct pbuf *p, err_t err) {
   altcp_wolfssl_state_t *state;
   struct altcp_pcb *conn = (struct altcp_pcb *)arg;
 
@@ -159,8 +126,7 @@ static err_t altcp_wolfssl_lower_recv(
   LWIP_UNUSED_ARG(err);
 
   if (!conn) {
-    /* no connection given as arg? should not happen, but prevent pbuf/conn
-       leaks */
+    /* no connection given as arg? should not happen, but prevent pbuf/conn leaks */
     if (p != NULL) {
       pbuf_free(p);
     }
@@ -185,12 +151,10 @@ static err_t altcp_wolfssl_lower_recv(
     if ((state->flags & \
       (ALTCP_WOLFSSL_FLAGS_HANDSHAKE_DONE | ALTCP_WOLFSSL_FLAGS_UPPER_CALLED)) ==
       (ALTCP_WOLFSSL_FLAGS_HANDSHAKE_DONE | ALTCP_WOLFSSL_FLAGS_UPPER_CALLED)) {
-      /* need to notify upper layer (e.g. 'accept' called or 'connect'
-         succeeded) */
+      /* need to notify upper layer (e.g. 'accept' called or 'connect' succeeded) */
       if ((NULL != state->rx) || (NULL != state->rx_app)) {
         state->flags |= ALTCP_WOLFSSL_FLAGS_RX_CLOSE_QUEUED;
-        /* this is a normal close (FIN) but we have unprocessed data, so delay
-           the FIN */
+        /* this is a normal close (FIN) but we have unprocessed data, so delay the FIN */
         altcp_wolfssl_handle_rx_appldata(conn, state);
         return ERR_OK;
       }
@@ -209,23 +173,24 @@ static err_t altcp_wolfssl_lower_recv(
     return ERR_OK;
   }
 
-  /* If we come here, the connection is in good state (handshake phase or
-     application data phase). Queue up the pbuf for processing as handshake 
-     data or application data. */
+  /* If we come here, the connection is in good state (handshake phase or application data phase).
+     Queue up the pbuf for processing as handshake data or application data. */
   if (NULL == state->rx) {
     state->rx = p;
   } else {
     LWIP_ASSERT("rx pbuf overflow", (int)p->tot_len + (int)p->len <= 0xFFFF);
     pbuf_cat(state->rx, p);
   }
+  rt_kprintf("lower_recve! %p\n", inner_conn);
   return altcp_wolfssl_lower_recv_process(conn, state);
 }
 
-static err_t altcp_wolfssl_lower_recv_process(
-  struct altcp_pcb *conn, altcp_wolfssl_state_t *state) {
+static err_t altcp_wolfssl_lower_recv_process(struct altcp_pcb *conn, altcp_wolfssl_state_t *state) {
   if (!(state->flags & ALTCP_WOLFSSL_FLAGS_HANDSHAKE_DONE)) {
     /* handle connection setup (handshake not done) */
-    int ret = wolfSSL_connect(state->ssl);
+    int ret = wolfSSL_negotiate(state->ssl);
+    rt_kprintf("nego ret %d, %d\n", ret, state->bio_bytes_read);
+    rt_kprintf("nego %p %p, %p\n", conn, state, conn->state);
     if (state->bio_bytes_read) {
       /* acknowledge all bytes read */
       altcp_wolfssl_lower_recved(conn->inner_conn, state->bio_bytes_read);
@@ -239,10 +204,11 @@ static err_t altcp_wolfssl_lower_recv_process(
         /* handshake not done, wait for more recv calls */
         LWIP_ASSERT(
           "in this state, the rx chain should be empty", state->rx == NULL);
+        rt_kprintf("nego want\n");
         return ERR_OK;
       } else {
         LWIP_DEBUGF(
-          ALTCP_WOLFSSL_DEBUG, ("wolfSSL_connect failed: %d\n", ssl_err));
+          ALTCP_WOLFSSL_DEBUG, ("wolfSSL_negotiate failed: %d\n", ssl_err));
         /* handshake failed, connection has to be closed */
         if (conn->err) {
           conn->err(conn->arg, ERR_CLSD);
@@ -254,12 +220,13 @@ static err_t altcp_wolfssl_lower_recv_process(
       }
     }
 
+    rt_kprintf("handshake succeeded\n");
     /* If we come here, handshake succeeded. */
     LWIP_ASSERT("state->bio_bytes_read", state->bio_bytes_read == 0);
     LWIP_ASSERT("state->bio_bytes_appl", state->bio_bytes_appl == 0);
     state->flags |= ALTCP_WOLFSSL_FLAGS_HANDSHAKE_DONE;
     /* call upper "connected" (this can only happen for active open) */
-    if (conn->connected) {
+    if (conn->connected && (state->ssl->options.side == WOLFSSL_CLIENT_END)) {
       err_t err = conn->connected(conn->arg, conn, ERR_OK);
       if (ERR_OK != err) {
         return err;
@@ -275,8 +242,7 @@ static err_t altcp_wolfssl_lower_recv_process(
 }
 
 /* Pass queued decoded rx data to application */
-static err_t altcp_wolfssl_pass_rx_data(
-  struct altcp_pcb *conn, altcp_wolfssl_state_t *state) {
+static err_t altcp_wolfssl_pass_rx_data(struct altcp_pcb *conn, altcp_wolfssl_state_t *state) {
   err_t err;
   struct pbuf *buf;
   LWIP_ASSERT("conn != NULL", conn != NULL);
@@ -288,8 +254,7 @@ static err_t altcp_wolfssl_pass_rx_data(
     if (conn->recv) {
       /* call upper "recv" */
       u16_t tot_len = buf->tot_len;
-      /* this needs to be increased first because the 'recved' call may come
-         nested */
+      /* this needs to be increased first because the 'recved' call may come nested */
       state->rx_passed_unrecved += tot_len;
       state->flags |= ALTCP_WOLFSSL_FLAGS_UPPER_CALLED;
       err = conn->recv(conn->arg, conn, buf, ERR_OK);
@@ -297,7 +262,7 @@ static err_t altcp_wolfssl_pass_rx_data(
         if (err == ERR_ABRT) {
           return ERR_ABRT;
         }
-         /* not received, leave the pbuf(s) queued (and decrease 'unrecved' again) */
+        /* not received, leave the pbuf(s) queued (and decrease 'unrecved' again) */
         LWIP_ASSERT("state == conn->state", state == conn->state);
         state->rx_app = buf;
         state->rx_passed_unrecved -= tot_len;
@@ -325,8 +290,7 @@ static err_t altcp_wolfssl_pass_rx_data(
 
   /* application may have close the connection */
   if (conn->state != state) {
-    /* return error code to ensure altcp_wolfssl_handle_rx_appldata() exits the
-       loop */
+    /* return error code to ensure altcp_wolfssl_handle_rx_appldata() exits the loop */
     return ERR_CLSD;
   }
   return ERR_OK;
@@ -348,13 +312,11 @@ static err_t altcp_wolfssl_handle_rx_appldata(
     /* allocate a full-sized unchained PBUF_POOL: this is for RX! */
     struct pbuf *buf = pbuf_alloc(PBUF_RAW, PBUF_POOL_BUFSIZE, PBUF_POOL);
     if (buf == NULL) {
-      /* We're short on pbufs, try again later from 'poll' or 'recv'
-         callbacks. */
+      /* We're short on pbufs, try again later from 'poll' or 'recv' callbacks. */
       return ERR_OK;
     }
 
-    /* decrypt application data, this pulls encrypted RX data off state->rx
-       pbuf chain */
+    /* decrypt application data, this pulls encrypted RX data off state->rx pbuf chain */
     ret = wolfSSL_read(state->ssl, buf->payload, PBUF_POOL_BUFSIZE);
     if (0 >= ret) {
       /* process error */
@@ -373,6 +335,7 @@ static err_t altcp_wolfssl_handle_rx_appldata(
         state->ssl_err = ssl_err;
         state->flags |= ALTCP_WOLFSSL_FLAGS_SSL_ERROR;
       }
+      rt_kprintf("ERR_OK\n");
       return ERR_OK;
 
     } else { /* (0 < ret) */
@@ -407,8 +370,7 @@ static err_t altcp_wolfssl_handle_rx_appldata(
       /* recv callback needs to return this as the pcb is deallocated */
       return ERR_ABRT;
     } else if (ERR_OK != err) {
-      /* we hide all other errors as we retry feeding the pbuf to the app
-         later */
+      /* we hide all other errors as we retry feeding the pbuf to the app later */
       state->app_err = err;
       state->flags |= ALTCP_WOLFSSL_FLAGS_APP_ERROR;
       return ERR_OK;
@@ -542,8 +504,7 @@ static void altcp_wolfssl_remove_callbacks(struct altcp_pcb *inner_conn) {
   altcp_poll(inner_conn, NULL, inner_conn->pollinterval);
 }
 
-static void altcp_wolfssl_setup_callbacks(
-  struct altcp_pcb *conn, struct altcp_pcb *inner_conn) {
+static void altcp_wolfssl_setup_callbacks(struct altcp_pcb *conn, struct altcp_pcb *inner_conn) {
   altcp_arg(inner_conn, conn);
   altcp_recv(inner_conn, altcp_wolfssl_lower_recv);
   altcp_sent(inner_conn, altcp_wolfssl_lower_sent);
@@ -552,8 +513,7 @@ static void altcp_wolfssl_setup_callbacks(
   /* listen is set totally different :-) */
 }
 
-static err_t altcp_wolfssl_setup(
-  void *conf, struct altcp_pcb *conn, struct altcp_pcb *inner_conn) {
+static err_t altcp_wolfssl_setup(void *conf, struct altcp_pcb *conn, struct altcp_pcb *inner_conn) {
   struct altcp_tls_config *config = (struct altcp_tls_config *)conf;
   altcp_wolfssl_state_t *state;
   if (!conf) {
@@ -588,8 +548,7 @@ static err_t altcp_wolfssl_setup(
   return ERR_OK;
 }
 
-struct altcp_pcb *altcp_tls_wrap(
-  struct altcp_tls_config *config, struct altcp_pcb *inner_pcb) {
+struct altcp_pcb *altcp_tls_wrap(struct altcp_tls_config *config, struct altcp_pcb *inner_pcb) {
   struct altcp_pcb *ret;
   rt_kprintf("!!! altcp_tls_wrap ver %x\n", config->ctx->method->version);
   if (inner_pcb == NULL) {
@@ -627,8 +586,7 @@ void altcp_wolfssl_logging(const int logLevel, const char *const logMessage) {
  * ATTENTION: Server certificate and private key have to be added outside this function!
  * ATTENTION: System time must be match the valid period of CA.
  */
-static struct altcp_tls_config *altcp_tls_create_config(
-  int is_server, int have_cert, int have_pkey, int have_ca) {
+static struct altcp_tls_config *altcp_tls_create_config(int is_server) {
   struct altcp_tls_config *conf;
 
   if (TCP_WND < MAX_RECORD_SIZE) {
@@ -637,14 +595,6 @@ static struct altcp_tls_config *altcp_tls_create_config(
   }
 
   altcp_wolfssl_mem_init();
-
-  // TODO
-  // if (have_cert) {
-  // }
-  // if (have_ca) {
-  // }
-  // if (have_pkey) {
-  // }
 
   conf = (struct altcp_tls_config *)altcp_wolfssl_alloc_config();
   if (conf == NULL) {
@@ -660,7 +610,11 @@ static struct altcp_tls_config *altcp_tls_create_config(
   wolfSSL_Init();
 
   /* new context */
-  conf->ctx = wolfSSL_CTX_new(wolfTLSv1_3_client_method());
+  if (is_server) {
+    conf->ctx = wolfSSL_CTX_new(wolfTLSv1_3_server_method());
+  } else {
+    conf->ctx = wolfSSL_CTX_new(wolfTLSv1_3_client_method());
+  }
   if (NULL == conf->ctx) {
     LWIP_DEBUGF(ALTCP_WOLFSSL_DEBUG, ("wolfSSL_CTX_new failed\n"));
     altcp_wolfssl_free_config(conf);
@@ -680,16 +634,31 @@ struct altcp_tls_config *altcp_tls_create_config_server_privkey_cert(
   const u8_t *privkey, size_t privkey_len,
   const u8_t *privkey_pass, size_t privkey_pass_len,
   const u8_t *cert, size_t cert_len) {
-  struct altcp_tls_config *conf = altcp_tls_create_config(1, 1, 1, 0);
+  int ret;
+  struct altcp_tls_config *conf = altcp_tls_create_config(1);
   if (conf == NULL) {
     return NULL;
   }
+  (void)privkey_pass;
+  (void)privkey_pass_len;
 
-  // TODO: cert
+  /* Initialize the client certificate and corresponding private key */
+  ret = wolfSSL_CTX_use_certificate_buffer(conf->ctx, cert, cert_len, SSL_FILETYPE_PEM);
+  if (SSL_SUCCESS != ret) {
+    LWIP_DEBUGF(ALTCP_WOLFSSL_DEBUG,
+      ("wolfSSL_CTX_use_certificate_buffer cert failed: %d 0x%x", ret, -1*ret));
+    altcp_wolfssl_free_config(conf);
+    return NULL;
+  }
 
-  // TODO: pk
-
-  // TODO: ca
+  ret = wolfSSL_CTX_use_PrivateKey_buffer(
+    conf->ctx, privkey, privkey_len, SSL_FILETYPE_PEM);
+  if (SSL_SUCCESS != ret) {
+    LWIP_DEBUGF(ALTCP_WOLFSSL_DEBUG, 
+      ("wolfSSL_CTX_use_PrivateKey_buffer failed: %d 0x%x", ret, -1*ret));
+    altcp_wolfssl_free_config(conf);
+    return NULL;
+  }
 
   return conf;
 }
@@ -697,8 +666,8 @@ struct altcp_tls_config *altcp_tls_create_config_server_privkey_cert(
 static struct altcp_tls_config *altcp_tls_create_config_client_common(
   const u8_t *ca, size_t ca_len, int is_2wayauth) {
   int ret;
-  struct altcp_tls_config *conf = altcp_tls_create_config(
-    0, is_2wayauth, is_2wayauth, ca != NULL);
+  struct altcp_tls_config *conf = altcp_tls_create_config(0);
+  (void)is_2wayauth;
   if (conf == NULL) {
     return NULL;
   }
@@ -707,8 +676,7 @@ static struct altcp_tls_config *altcp_tls_create_config_client_common(
    * CA certificate is optional (to save memory) but recommended for production environment
    * Without CA certificate, connection will be prone to man-in-the-middle attacks */
   if (ca) {
-    ret = wolfSSL_CTX_load_verify_buffer(
-      conf->ctx, ca, ca_len, WOLFSSL_FILETYPE_PEM);
+    ret = wolfSSL_CTX_load_verify_buffer(conf->ctx, ca, ca_len, WOLFSSL_FILETYPE_PEM);
     if (SSL_SUCCESS != ret) {
       LWIP_DEBUGF(ALTCP_WOLFSSL_DEBUG,
         ("wolfSSL_CTX_load_verify_buffer ca failed: %d 0x%x", ret, -1*ret));
@@ -731,6 +699,8 @@ struct altcp_tls_config *altcp_tls_create_config_client_2wayauth(
   const u8_t *cert, size_t cert_len) {
   int ret;
   struct altcp_tls_config *conf;
+  (void)privkey_pass;
+  (void)privkey_pass_len;
 
   if (!cert || !privkey) {
     LWIP_DEBUGF(ALTCP_WOLFSSL_DEBUG,
@@ -744,29 +714,21 @@ struct altcp_tls_config *altcp_tls_create_config_client_2wayauth(
   }
 
   /* Initialize the client certificate and corresponding private key */
-  ret = wolfSSL_CTX_use_certificate_buffer(
-    conf->ctx, cert, cert_len, SSL_FILETYPE_PEM);
+  ret = wolfSSL_CTX_use_certificate_buffer(conf->ctx, cert, cert_len, SSL_FILETYPE_PEM);
   if (SSL_SUCCESS != ret) {
     LWIP_DEBUGF(ALTCP_WOLFSSL_DEBUG,
-      ("wolfSSL_CTX_use_certificate_buffer cert failed: %d 0x%x",
-        ret, -1*ret));
+      ("wolfSSL_CTX_use_certificate_buffer cert failed: %d 0x%x", ret, -1*ret));
     altcp_wolfssl_free_config(conf);
     return NULL;
   }
 
-  ret = wolfSSL_CTX_use_PrivateKey_buffer(
-    conf->ctx, privkey, privkey_len, SSL_FILETYPE_PEM);
+  ret = wolfSSL_CTX_use_PrivateKey_buffer(conf->ctx, privkey, privkey_len, SSL_FILETYPE_PEM);
   if (SSL_SUCCESS != ret) {
     LWIP_DEBUGF(ALTCP_WOLFSSL_DEBUG, 
-      ("wolfSSL_CTX_use_PrivateKey_buffer failed: %d 0x%x",
-        ret, -1*ret));
+      ("wolfSSL_CTX_use_PrivateKey_buffer failed: %d 0x%x", ret, -1*ret));
     altcp_wolfssl_free_config(conf);
     return NULL;
   }
-
-  // TODO: init cert
-
-  // TODO: init PK
 
   return conf;
 }
@@ -851,6 +813,7 @@ static err_t altcp_wolfssl_close(struct altcp_pcb *conn) {
     return ERR_VAL;
   }
   inner_conn = conn->inner_conn;
+  rt_kprintf("close %p\n", inner_conn);
   if (inner_conn) {
     err_t err;
     altcp_poll_fn oldpoll = inner_conn->poll;

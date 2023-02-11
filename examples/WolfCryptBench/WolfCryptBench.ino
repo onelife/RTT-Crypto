@@ -1,16 +1,15 @@
 /***************************************************************************//**
  * @file    WolfCryptTest.ino
- * @brief   Arduino wolfSSL library crypto test
+ * @brief   Arduino wolfSSL library cryptographic algorithm benchmarking
  * @author  onelife <onelife.real[at]gmail.com>
  ******************************************************************************/
 #include <rtt.h>
-#include <wolfssl.h>
 #include <RttCrypto.h>
+#include <wolfssl.h>
 
 #define LOG_TAG "Bench"
 #include <log.h>
 
-#include <user_settings_extra.h>
 #include <wolfssl/wolfcrypt/settings.h>
 #include <wolfssl/wolfcrypt/logging.h>
 #include <wolfssl/wolfcrypt/error-crypt.h>

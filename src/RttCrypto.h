@@ -7,12 +7,9 @@
 #define __RTTCRYPTO_H__
 
 #include "hal_conf_extra.h"
-
+#include "user_settings_wolfssl.h"
 
 class WolfSslClass {
-  // private:
-  //   char buf[128];
-
   public:
     int begin();
 

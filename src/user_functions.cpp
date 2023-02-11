@@ -18,7 +18,7 @@ extern "C" {
 
 STM32RTC& rtc = STM32RTC::getInstance();
 
-time_t user_XTime(time_t *timer) {
+time_t user_xtime(time_t *timer) {
   time_t seconds = (time_t)rtc.getEpoch();
   if (NULL != timer) {
     *timer = seconds;
@@ -41,7 +41,7 @@ double current_time(int reset) {
 
 #else /* ARDUINO_ARCH_STM32 */
 
-time_t user_XTime(time_t *timer) {
+time_t user_xtime(time_t *timer) {
   rt_device_t rtc = RT_NULL;
   time_t seconds = 0;
 
@@ -62,7 +62,7 @@ time_t user_XTime(time_t *timer) {
 /* This is used by wolfCrypt benchmark tool only */
 double current_time(int reset) {
     (void)reset;
-    return (double)user_XTime(0);
+    return (double)user_xtime(0);
 }
 #endif /* NO_CRYPT_BENCHMARK */
 
